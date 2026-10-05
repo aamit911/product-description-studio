@@ -488,10 +488,197 @@ def render_validation(validation_problems, checked_claims, audit):
             st.warning("🤖 Independent AI factuality audit: FAIL/REVIEW")
 
 
+
+# ---------------- MVP 1 Review Helpers ----------------
+
+def init_review_state():
+    defaults = {
+        "single_product": None,
+        "single_result": None,
+        "single_validation_problems": [],
+        "single_checked_claims": 0,
+        "single_audit": None,
+        "single_approved": False,
+        "bulk_result_df": None,
+        "bulk_approved_rows": set(),
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def render_evidence_items(title, items):
+    st.markdown(f"### {title}")
+    normalized = normalize_list(items)
+    if not normalized:
+        st.caption("No items generated.")
+        return
+    for idx, item in enumerate(normalized, start=1):
+        if isinstance(item, dict):
+            text_value = clean_value(item.get("text") or item.get("claim"))
+            evidence = clean_value(item.get("source_evidence"))
+            st.markdown(f"**{idx}.** {text_value}")
+            if evidence:
+                st.caption(f"Evidence: {evidence}")
+        else:
+            st.markdown(f"**{idx}.** {item}")
+
+
+def render_single_review():
+    product = st.session_state.get("single_product")
+    result = st.session_state.get("single_result")
+    if not product or not result:
+        return
+
+    st.divider()
+    st.subheader("🔎 Product Review")
+    st.caption("Review the generated content and validation evidence before approving it.")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("### Source Product Data")
+        for key, value in product.items():
+            st.markdown(f"**{key}:** {value or '—'}")
+
+    with right:
+        st.markdown("### Generated Content")
+        st.markdown(f"**Product Title:** {result.get('product_title', '')}")
+        st.markdown(f"**Short Description:** {result.get('short_description', '')}")
+        st.markdown(f"**Long Description:** {result.get('long_description', '')}")
+        st.markdown(f"**SEO Title:** {result.get('seo_title', '')}")
+        st.markdown(f"**SEO Meta Description:** {result.get('seo_meta_description', '')}")
+        st.markdown(f"**SEO Keywords:** {', '.join(normalize_list(result.get('seo_keywords')))}")
+
+    a, b = st.columns(2)
+    with a:
+        render_evidence_items("Key Features", result.get("key_features"))
+    with b:
+        render_evidence_items("Product Benefits", result.get("product_benefits"))
+
+    problems = st.session_state.get("single_validation_problems", [])
+    checked = st.session_state.get("single_checked_claims", 0)
+    audit = st.session_state.get("single_audit")
+
+    st.markdown("### Validation & Audit")
+    if problems:
+        st.warning(f"REVIEW REQUIRED — {len(problems)} issue(s) detected.")
+        for issue in problems:
+            st.write(f"• {issue}")
+    else:
+        st.success(f"PASS — {checked} factual item(s) have source evidence.")
+
+    if audit:
+        if audit.get("status") == "PASS":
+            st.success("AI factuality audit: PASS")
+        else:
+            st.warning("AI factuality audit: FAIL / REVIEW")
+            for issue in audit.get("issues", []):
+                st.write(
+                    f"• {clean_value(issue.get('claim'))}: "
+                    f"{clean_value(issue.get('reason'))}"
+                )
+
+    st.markdown("### Approval")
+    if problems:
+        st.caption("Approval is available for review tracking, but publishing should not occur until issues are resolved.")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("✏️ Edit / Regenerate", key="single_regenerate"):
+            st.session_state["single_result"] = None
+            st.session_state["single_approved"] = False
+            st.rerun()
+    with c2:
+        if st.button("🔄 Re-run Validation", key="single_revalidate"):
+            try:
+                vp, cc, au = validate_content(
+                    product,
+                    result,
+                    provider,
+                    run_ai_audit=True,
+                )
+                st.session_state["single_validation_problems"] = vp
+                st.session_state["single_checked_claims"] = cc
+                st.session_state["single_audit"] = au
+                st.session_state["single_approved"] = False
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Validation failed: {exc}")
+    with c3:
+        if st.button("✅ Approve Product", key="single_approve", type="primary"):
+            if problems:
+                st.warning("Product has validation issues. Resolve them before approval.")
+            else:
+                st.session_state["single_approved"] = True
+                st.success("Product approved for export.")
+
+    if st.session_state.get("single_approved"):
+        approved_df = pd.DataFrame([content_to_row(product, result)])
+        st.download_button(
+            "⬇️ Export Approved Product",
+            data=dataframe_to_excel(approved_df),
+            file_name="approved_product.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="single_export_approved",
+        )
+
+
+def render_bulk_review_table(result_df):
+    st.subheader("🔎 Bulk Review Queue")
+    review_df = result_df[result_df["Validation Status"].isin(["REVIEW", "FAILED"])].copy()
+    if review_df.empty:
+        st.success("All generated products passed validation.")
+        return
+
+    st.warning(f"{len(review_df)} product(s) require review.")
+    display_columns = [
+        "Product Name", "Product Title", "Validation Status",
+        "Evidence Checks", "AI Audit", "Validation Issues"
+    ]
+    st.dataframe(review_df[display_columns], use_container_width=True, hide_index=True)
+
+    names = review_df["Product Name"].tolist()
+    selected = st.selectbox("Select a product to inspect", names, key="bulk_review_product")
+    selected_row = review_df[review_df["Product Name"] == selected].iloc[0]
+
+    with st.expander("View source and generated content", expanded=True):
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Source data**")
+            for col in ["Category", "Brand", "Material", "Target Customer", "Features"]:
+                st.markdown(f"**{col}:** {selected_row.get(col, '')}")
+        with right:
+            st.markdown("**Generated content**")
+            st.markdown(f"**Title:** {selected_row.get('Product Title', '')}")
+            st.markdown(f"**Short description:** {selected_row.get('Short Description', '')}")
+            st.markdown(f"**Long description:** {selected_row.get('Long Description', '')}")
+            st.markdown(f"**SEO title:** {selected_row.get('SEO Title', '')}")
+            st.markdown(f"**SEO description:** {selected_row.get('SEO Meta Description', '')}")
+
+        st.markdown("**Validation issues**")
+        st.write(selected_row.get("Validation Issues", "None"))
+
+    st.caption("Bulk review is intentionally approval-oriented. Products with validation issues remain REVIEW until corrected and regenerated.")
+
+
+def render_bulk_summary(result_df):
+    total = len(result_df)
+    passed = int((result_df["Validation Status"] == "PASS").sum())
+    review = int((result_df["Validation Status"] == "REVIEW").sum())
+    failed = int((result_df["Validation Status"] == "FAILED").sum())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", total)
+    c2.metric("Passed", passed)
+    c3.metric("Review", review)
+    c4.metric("Failed", failed)
+
+
+init_review_state()
+
 # ---------------- UI ----------------
 
-st.title("📦 AI Product Content Studio")
-st.caption("Product content generation with local Qwen3 4B or cloud Gemini")
+st.title("📦 AI Product Catalog Enrichment Studio")
+st.caption("MVP 1 — Generate → Validate → Review → Approve → Export")
 
 with st.sidebar:
     st.header("⚙️ AI Engine")
@@ -576,54 +763,19 @@ with tab_single:
                             product, result, provider, run_ai_audit=True
                         )
 
-                    st.divider()
-                    st.subheader("Generated Content")
-
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown("### Product Title")
-                        st.write(result.get("product_title", ""))
-                        st.markdown("### Short Description")
-                        st.write(result.get("short_description", ""))
-                        st.markdown("### Long Description")
-                        st.write(result.get("long_description", ""))
-                        st.markdown("### Key Features")
-                        for item in normalize_list(result.get("key_features")):
-                            if isinstance(item, dict):
-                                st.markdown(f"- {item.get('text', '')}")
-                                st.caption(f"Evidence: {item.get('source_evidence', '')}")
-                            else:
-                                st.markdown(f"- {item}")
-
-                    with c2:
-                        st.markdown("### Product Benefits")
-                        for item in normalize_list(result.get("product_benefits")):
-                            if isinstance(item, dict):
-                                st.markdown(f"- {item.get('text', '')}")
-                                st.caption(f"Evidence: {item.get('source_evidence', '')}")
-                            else:
-                                st.markdown(f"- {item}")
-                        st.markdown("### SEO Title")
-                        st.write(result.get("seo_title", ""))
-                        st.markdown("### SEO Meta Description")
-                        st.write(result.get("seo_meta_description", ""))
-                        st.markdown("### SEO Keywords")
-                        st.write(", ".join(normalize_list(result.get("seo_keywords"))))
-
-                    render_validation(validation_problems, checked_claims, audit)
-                    if provider.startswith("Cloud"):
-                        used_model = st.session_state.get("last_gemini_model", "unknown")
-                        if st.session_state.get("last_gemini_fallback"):
-                            st.info(f"Gemini fallback used: {used_model}")
-                        else:
-                            st.caption(f"Gemini model used: {used_model}")
-                    st.info(
-                        "The tool uses deterministic evidence/numeric checks plus a separate AI audit. "
-                        "It is a review aid, not a legal or publication guarantee."
-                    )
+                    st.session_state["single_product"] = product
+                    st.session_state["single_result"] = result
+                    st.session_state["single_validation_problems"] = validation_problems
+                    st.session_state["single_checked_claims"] = checked_claims
+                    st.session_state["single_audit"] = audit
+                    st.session_state["single_approved"] = False
+                    st.success("Content generated and validation completed. Review the product below.")
+                    st.rerun()
 
                 except Exception as e:
                     st.error(f"Generation failed: {e}")
+
+render_single_review()
 
 # ---------------- Bulk Excel ----------------
 
@@ -740,14 +892,27 @@ with tab_bulk:
                         progress.progress((index + 1) / len(df))
 
                     result_df = pd.DataFrame(results)
+                    st.session_state["bulk_result_df"] = result_df
                     st.success("✅ Bulk generation completed.")
-                    st.dataframe(result_df, use_container_width=True)
+                    render_bulk_summary(result_df)
+                    st.dataframe(result_df, use_container_width=True, hide_index=True)
                     st.download_button(
                         "⬇️ Download Generated Excel",
                         data=dataframe_to_excel(result_df),
                         file_name="generated_product_content.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="bulk_download_all",
                     )
+                    passed_df = result_df[result_df["Validation Status"] == "PASS"].copy()
+                    if not passed_df.empty:
+                        st.download_button(
+                            "⬇️ Download PASS Products Only",
+                            data=dataframe_to_excel(passed_df),
+                            file_name="approved_product_content.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="bulk_download_pass",
+                        )
+                    render_bulk_review_table(result_df)
 
         except Exception as e:
             st.error(f"Could not read the Excel file: {e}")
